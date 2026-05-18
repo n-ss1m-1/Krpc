@@ -9,6 +9,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <arpa/inet.h>
+#include <time.h>
 #include "KrpcLogger.h"
 
 std::mutex g_data_mutx;  // 全局互斥锁，用于保护共享数据的线程安全
@@ -22,6 +23,11 @@ ssize_t KrpcChannel::recv_exact(int fd, char* buf, size_t size) {
         if (ret == 0) return 0; // 对端关闭
         if (ret == -1) {
             if (errno == EINTR) continue; // 中断信号，继续读
+            if (errno == EAGAIN || errno == EWOULDBLOCK) 
+            {
+                LOG(ERROR) << "recv timeout";
+                return -2;     //超时
+            }
             return -1; // 错误
         }
         total_read += ret;
@@ -117,7 +123,22 @@ void KrpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method,
     
     // A. 先读4字节长度头
     uint32_t response_len = 0;
-    if (recv_exact(m_clientfd, (char*)&response_len, 4) != 4) {
+    auto ret1 = recv_exact(m_clientfd, (char*)&response_len, 4);
+    if (ret1 == 0)
+    {
+        close(m_clientfd);
+        m_clientfd = -1;
+        controller->SetFailed("server close connection");
+        return;
+    }
+    if (ret1 == -2) {
+        close(m_clientfd);
+        m_clientfd = -1;
+        controller->SetFailed("recv timeout");
+        return;
+    }
+    else if(ret1 != 4)
+    {
         close(m_clientfd);
         m_clientfd = -1;
         controller->SetFailed("recv response length error");
@@ -127,7 +148,22 @@ void KrpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method,
 
     // B. 根据长度读取Body
     std::vector<char> recv_buf(response_len);
-    if (recv_exact(m_clientfd, recv_buf.data(), response_len) != response_len) {    //vector<char> 的 .data()方法：获取首元素的原始地址
+    auto ret2 = recv_exact(m_clientfd, recv_buf.data(), response_len);      //vector<char> 的 .data()方法：获取首元素的原始地址
+    if (ret2 == 0)
+    {
+        close(m_clientfd);
+        m_clientfd = -1;
+        controller->SetFailed("server close connection");
+        return;
+    }
+    if (ret2 == -2) {
+        close(m_clientfd);
+        m_clientfd = -1;
+        controller->SetFailed("recv timeout");
+        return;
+    }
+    else if(ret2 != (ssize_t)response_len)
+    {
         close(m_clientfd);
         m_clientfd = -1;
         controller->SetFailed("recv response body error");
@@ -166,6 +202,18 @@ bool KrpcChannel::newConnect(const char *ip, uint16_t port) {
         char errtxt[512] = {0};
         LOG(INFO) << "connect error" << strerror_r(errno, errtxt, sizeof(errtxt));  // 打印错误信息
         LOG(ERROR) << "connect server error" << errtxt;  // 记录错误日志
+        return false;
+    }
+
+    // 设置fd请求超时
+    struct timeval timeout;
+    timeout.tv_sec=3;
+    timeout.tv_usec=0;
+    if(-1 == setsockopt(clientfd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout)))
+    {
+        close(clientfd);
+        char errtxt[512] = {0};
+        LOG(ERROR) << "set clientfd timeout error" <<strerror_r(errno, errtxt, sizeof(errtxt));
         return false;
     }
 

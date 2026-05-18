@@ -9,11 +9,19 @@ std::condition_variable cv; // 条件变量，用于线程间通信
 bool is_connected = false;  // 标记ZooKeeper客户端是否连接成功
 
 // 全局的watcher观察器，用于接收ZooKeeper服务器的通知(本质：回调函数)
-void global_watcher(zhandle_t *zh, int type, int status, const char *path, void *watcherCtx) {
+void global_watcher(zhandle_t *zh, int type, int status, const char *path, void *watcherCtx) 
+{
+    //通过watcherCtx传入ZkClient的this指针(需要用这个this指针调用ReConnect())
+    ZkClient* m_client = (ZkClient*)watcherCtx;
+
     if (type == ZOO_SESSION_EVENT) {  // 回调消息类型和会话相关的事件
         if (status == ZOO_CONNECTED_STATE) {  // ZooKeeper客户端和服务器连接成功
             std::lock_guard<std::mutex> lock(cv_mutex);  // 加锁保护
             is_connected = true;  // 标记连接成功
+        }
+        else if(status == ZOO_EXPIRED_SESSION_STATE)
+        {
+            m_client->ReConnect();
         }
     }
     cv.notify_all();  // 通知所有等待的线程
@@ -61,7 +69,7 @@ void ZkClient::Start() {
     // void *context,             // 传给回调的上下文
     // int flags                  // 标志（填 0）
     // );
-    m_zhandle = zookeeper_init(connstr.c_str(), global_watcher, 6000, nullptr, nullptr, 0);
+    m_zhandle = zookeeper_init(connstr.c_str(), global_watcher, 1000, nullptr, this, 0);
     if (nullptr == m_zhandle) {  // 初始化失败
         LOG(ERROR) << "zookeeper_init error";
         exit(EXIT_FAILURE);  // 退出程序
@@ -78,6 +86,26 @@ void ZkClient::Start() {
     std::unique_lock<std::mutex> lock(cv_mutex);
     cv.wait(lock, [] { return is_connected; });  // 阻塞等待，直到连接成功
     LOG(INFO) << "zookeeper_init success";  // 记录日志，表示连接成功
+}
+
+//会话过期，zkclient重新连接zkserver
+void ZkClient::ReConnect()
+{
+    LOG(ERROR) << "zookeeper session expired, reconnecting...";
+    
+    if(m_zhandle != nullptr)
+    {
+        zookeeper_close(m_zhandle);
+        m_zhandle = nullptr;
+    }
+
+    //复用
+    {
+        std::lock_guard<std::mutex> lock(cv_mutex);
+        is_connected = false;
+    }
+    Start();
+    LOG(INFO) << "zookeeper reconnect success";
 }
 
 // 创建ZooKeeper节点

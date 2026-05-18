@@ -1,5 +1,7 @@
 build/
-bin/
+bin/client
+bin/server
+demo/
 *.o
 *.a
 *.so

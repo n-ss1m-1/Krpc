@@ -12,8 +12,6 @@
 #include <time.h>
 #include "KrpcLogger.h"
 
-std::mutex g_data_mutx;  // 全局互斥锁，用于保护共享数据的线程安全
-
 
 // 辅助函数：循环读取直到读够 size 字节
 ssize_t KrpcChannel::recv_exact(int fd, char* buf, size_t size) {
@@ -55,6 +53,7 @@ void KrpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method,
     std::string method_path = "/" + service_name + "/" + method_name;  // 构造ZooKeeper路径
     std::string host_data;
 
+    //查看是否有相应的缓存
     if (zkCli.HasCache(method_path))
     {
         //缓存有效，无需连接zk服务器
@@ -68,13 +67,30 @@ void KrpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method,
     }
     else
     {
-        //没有相应的缓存
-        LOG(INFO) << "缓存无效,连接到ZooKeeper服务器+查询提供相应服务的服务器ip和port" ;
-        zkCli.Start();  // 连接ZooKeeper服务器
-        host_data = QueryServiceHost(&zkCli, method_path, m_idx);  // 查询提供相应服务的服务器ip和port
+        //暂时没有相应的缓存
+        static std::mutex g_cache_init_mutex;
+        std::lock_guard<std::mutex> lock(g_cache_init_mutex);       //尝试获取锁来更新缓存
+        //再次判断是否缓存有效
+        if(zkCli.HasCache(method_path))
+        {
+            //缓存有效，无需连接zk服务器
+            LOG(INFO) << "其他线程更新了缓存->缓存有效,无需连接zk服务器" ;
+            host_data = zkCli.GetCache(method_path);    
+            
+            m_idx = host_data.find(":");  // 查找IP和端口的分隔符
+            if (m_idx == -1) {  // 如果分隔符不存在
+            LOG(ERROR) << method_path + " address is invalid!";  // 记录错误日志
+            }  
+        }
+        else
+        {
+            LOG(INFO) << "缓存无效,连接到ZooKeeper服务器+查询提供相应服务的服务器ip和port" ;
+            zkCli.Start();  // 连接ZooKeeper服务器
+            host_data = QueryServiceHost(&zkCli, method_path, m_idx);  // 查询提供相应服务的服务器ip和port
 
-        //将查询到的有效数据保存到缓存中
-        if(host_data != " ") zkCli.SetCache(method_path,host_data);
+            //将查询到的有效数据保存到缓存中
+            if(host_data != " ") zkCli.SetCache(method_path,host_data);
+        }
     }
     m_ip = host_data.substr(0, m_idx);  // 从查询结果中提取IP地址
     LOG(INFO) << "ip: " << m_ip;

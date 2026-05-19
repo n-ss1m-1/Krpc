@@ -51,15 +51,36 @@ void KrpcChannel::CallMethod(const ::google::protobuf::MethodDescriptor *method,
         method_name = method->name();   // 方法名
 
         // 客户端需要查询ZooKeeper，找到提供该服务的服务器地址
-        ZkClient zkCli;
-        zkCli.Start();  // 连接ZooKeeper服务器
-        std::string host_data = QueryServiceHost(&zkCli, service_name, method_name, m_idx);  // 查询提供相应服务的服务器ip和port
+        ZkClient& zkCli = ZkClient::GetInstance();
+        std::string method_path = "/" + service_name + "/" + method_name;  // 构造ZooKeeper路径
+        std::string host_data;
+
+        if (zkCli.HasCache(method_path))
+        {
+            //缓存有效，无需连接zk服务器
+            host_data = zkCli.GetCache(method_path);    
+            
+            m_idx = host_data.find(":");  // 查找IP和端口的分隔符
+            if (m_idx == -1) {  // 如果分隔符不存在
+            LOG(ERROR) << method_path + " address is invalid!";  // 记录错误日志
+            }    
+        }
+        else
+        {
+            //没有相应的缓存
+            zkCli.Start();  // 连接ZooKeeper服务器
+            host_data = QueryServiceHost(&zkCli, method_path, m_idx);  // 查询提供相应服务的服务器ip和port
+
+            //将查询到的有效数据保存到缓存中
+            if(host_data != " ") zkCli.SetCache(method_path,host_data);
+        }
         m_ip = host_data.substr(0, m_idx);  // 从查询结果中提取IP地址
         LOG(INFO) << "ip: " << m_ip;
         m_port = atoi(host_data.substr(m_idx + 1, host_data.size() - m_idx).c_str());  // 从查询结果中提取端口号
         LOG(INFO) << "port: " << m_port;
 
-        // 尝试连接服务器
+
+        // 尝试连接rpc服务器
         auto rt = newConnect(m_ip.c_str(), m_port);
         if (!rt) {
             LOG(ERROR) << "connect server error";  // 连接失败，记录错误日志
@@ -222,13 +243,10 @@ bool KrpcChannel::newConnect(const char *ip, uint16_t port) {
 }
 
 // 从ZooKeeper查询服务地址
-std::string KrpcChannel::QueryServiceHost(ZkClient *zkclient, std::string service_name, std::string method_name, int &idx) {
-    std::string method_path = "/" + service_name + "/" + method_name;  // 构造ZooKeeper路径
+std::string KrpcChannel::QueryServiceHost(ZkClient *zkclient, std::string method_path, int &idx) {
     LOG(INFO) << "method_path: " << method_path;
 
-    std::unique_lock<std::mutex> lock(g_data_mutx);  // 加锁，保证线程安全
     std::string host_data_1 = zkclient->GetData(method_path.c_str());  // 从ZooKeeper获取数据
-    lock.unlock();  // 解锁
 
     if (host_data_1 == "") {  // 如果未找到服务地址
         LOG(ERROR) << method_path + " is not exist!";  // 记录错误日志

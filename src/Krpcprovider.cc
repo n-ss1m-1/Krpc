@@ -63,7 +63,7 @@ void KrpcProvider::Run() {
     server->setThreadNum(4);
 
     // 将当前RPC节点上要发布的服务全部注册到ZooKeeper上，让RPC客户端可以在ZooKeeper上发现服务
-    ZkClient zkclient;
+    ZkClient& zkclient = ZkClient::GetInstance();
     zkclient.Start();  // 连接ZooKeeper服务器
     // service_name为永久节点，method_name为临时节点
     for (auto &sp : service_map) {
